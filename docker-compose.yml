@@ -1,0 +1,75 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: repolens
+      POSTGRES_USER: repolens
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-repolens_secret}
+    ports:
+      - "127.0.0.1:5433:5432"
+      - "192.168.1.4:5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U repolens"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  ollama:
+    image: ollama/ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql+asyncpg://repolens:${POSTGRES_PASSWORD:-repolens_secret}@db:5432/repolens
+      DATABASE_URL_SYNC: postgresql+psycopg2://repolens:${POSTGRES_PASSWORD:-repolens_secret}@db:5432/repolens
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      OLLAMA_BASE_URL: http://ollama:11434
+      CLONE_DIR: /tmp/repos
+    ports:
+      - "127.0.0.1:8010:8010"
+      - "192.168.1.4:8010:8010"
+    volumes:
+      - repo_clones:/tmp/repos
+      - ./backend/app:/app/app
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: dev
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5173:5173"
+      - "192.168.1.4:5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    environment:
+      VITE_API_URL: http://localhost:8010
+
+volumes:
+  postgres_data:
+  repo_clones:
+  ollama_data:
