@@ -39,13 +39,21 @@ def _build_file_index(parsed_files: list[ParsedFile]) -> dict[str, str]:
         index[norm_path] = norm_path
         index[base] = norm_path
 
-        # Map without common prefixes (src/, lib/, app/)
-        for prefix in ["src/", "lib/", "app/"]:
-            if norm_path.startswith(prefix):
-                trimmed = norm_path[len(prefix):]
-                trimmed_base = trimmed.rsplit(".", 1)[0] if "." in trimmed.split("/")[-1] else trimmed
-                index[trimmed] = norm_path
-                index[trimmed_base] = norm_path
+        # Map every multi-segment suffix of the path, not a fixed prefix list.
+        # Real repos nest the importable package under an arbitrary top-level
+        # directory (backend/, src/, server/, ...) that can't be known up
+        # front — e.g. "backend/app/models.py" needs to match an import of
+        # "app.models" even though "backend/" was never in any guessed prefix
+        # list. Require at least one directory segment (skip the bare
+        # filename) since a lone filename is too ambiguous across a big repo.
+        parts = base.split("/")
+        for i in range(1, len(parts)):
+            suffix = "/".join(parts[i:])
+            if "/" not in suffix:
+                continue
+            index.setdefault(suffix, norm_path)
+            if pf.language == "Python":
+                index.setdefault(suffix.replace("/", "."), norm_path)
 
         # Python dotted path (e.g., "app.utils.helper" -> "app/utils/helper.py")
         if pf.language == "Python":

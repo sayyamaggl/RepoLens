@@ -8,7 +8,6 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-repolens_secret}
     ports:
       - "127.0.0.1:5433:5432"
-      - "192.168.1.4:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
@@ -42,7 +41,6 @@ services:
       CLONE_DIR: /tmp/repos
     ports:
       - "127.0.0.1:8010:8010"
-      - "192.168.1.4:8010:8010"
     volumes:
       - repo_clones:/tmp/repos
       - ./backend/app:/app/app
@@ -60,7 +58,6 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:5173:5173"
-      - "192.168.1.4:5173:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules

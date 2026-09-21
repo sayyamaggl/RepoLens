@@ -6,6 +6,7 @@ repo_ingestor -> ast_parser -> dependency_graph -> insight_engine -> summary_gen
 Each stage updates the repo status in the database for progress tracking.
 """
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -104,7 +105,9 @@ async def run_pipeline(repo_url: str, session: AsyncSession, is_resume: bool = F
         logger.info(f"[Pipeline] Stage 2: Parsing {len(repo_data['source_files'])} files")
         await _update_status(session, repo_id, "parsing")
 
-        parsed_files = parse_repo(repo_data["source_files"])
+        # parse_repo is CPU-bound and synchronous (tree-sitter) — run off the event
+        # loop so a large repo doesn't block other requests/other users' polling.
+        parsed_files = await asyncio.to_thread(parse_repo, repo_data["source_files"])
 
         # === Stage 3: Dependency Graph ===
         logger.info("[Pipeline] Stage 3: Building dependency graph")
@@ -182,12 +185,26 @@ async def run_pipeline(repo_url: str, session: AsyncSession, is_resume: bool = F
             repo_id=repo_id,
             narrative=narrative,
             entry_points=[
-                {"file_id": file_id_map.get(ep["path"]), "path": ep["path"], "score": ep["score"]}
+                {
+                    "file_id": file_id_map.get(ep["path"]),
+                    "path": ep["path"],
+                    "score": ep["score"],
+                    "reasons": ep.get("reasons", []),
+                    "in_degree": ep.get("in_degree", 0),
+                    "out_degree": ep.get("out_degree", 0),
+                }
                 for ep in insights.get("entry_points", [])
                 if ep["path"] in file_id_map
             ],
             core_modules=[
-                {"file_id": file_id_map.get(cm["path"]), "path": cm["path"], "score": cm["score"]}
+                {
+                    "file_id": file_id_map.get(cm["path"]),
+                    "path": cm["path"],
+                    "score": cm["score"],
+                    "in_degree": cm.get("in_degree", 0),
+                    "out_degree": cm.get("out_degree", 0),
+                    "betweenness": cm.get("betweenness", 0.0),
+                }
                 for cm in insights.get("core_modules", [])
                 if cm["path"] in file_id_map
             ],

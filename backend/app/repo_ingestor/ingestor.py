@@ -12,6 +12,7 @@ import os
 import re
 import json
 import shutil
+import asyncio
 import logging
 from pathlib import Path
 from datetime import datetime
@@ -102,6 +103,44 @@ def clone_repo(url: str) -> Path:
     return clone_path
 
 
+def _is_trivially_empty(fpath: Path) -> bool:
+    """
+    True if a file has no real code — only blank lines, comments, a bare
+    docstring, or a lone `pass`/`...`. This is what lets a placeholder
+    __init__.py get skipped without blacklisting __init__.py as a filename;
+    one that actually re-exports symbols still has real code and is kept.
+    """
+    try:
+        text = fpath.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+
+    in_block_comment = False
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if in_block_comment:
+            if line.endswith("*/"):
+                in_block_comment = False
+            continue
+        if line.startswith("/*"):
+            if not line.endswith("*/"):
+                in_block_comment = True
+            continue
+        if line.startswith("#") or line.startswith("//"):
+            continue
+        if line in ("pass", "...", '"""', "'''"):
+            continue
+        if len(line) >= 6 and (
+            (line.startswith('"""') and line.endswith('"""'))
+            or (line.startswith("'''") and line.endswith("'''"))
+        ):
+            continue
+        return False  # found a real line of code
+    return True
+
+
 def _walk_source_files(repo_path: Path) -> list[Path]:
     """Walk the repo and return all source code file paths."""
     source_files = []
@@ -113,7 +152,7 @@ def _walk_source_files(repo_path: Path) -> list[Path]:
             if f in SKIP_FILES:
                 continue
             fpath = Path(root) / f
-            if fpath.suffix in EXTENSION_LANG_MAP:
+            if fpath.suffix in EXTENSION_LANG_MAP and not _is_trivially_empty(fpath):
                 source_files.append(fpath)
 
     return source_files
@@ -276,8 +315,9 @@ async def ingest_repo(url: str, session) -> dict:
 
     name = get_repo_name(url)
 
-    # Clone
-    repo_path = clone_repo(url)
+    # Clone — clone_repo() is synchronous (GitPython), so run it in a thread
+    # instead of blocking the event loop (and every other in-flight request).
+    repo_path = await asyncio.to_thread(clone_repo, url)
 
     # Detect
     language = detect_language(repo_path)

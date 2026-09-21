@@ -1,5 +1,5 @@
 """
-summary_generator Ã¢â‚¬â€ LLM-powered grounded summary generation.
+summary_generator — LLM-powered grounded summary generation.
 
 This module constructs prompts from VERIFIED structural facts (from insight_engine)
 and code snippets, then calls the LLM to produce:
@@ -23,7 +23,7 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
-async def _call_openrouter(prompt: str, system_prompt: str) -> str:
+async def _call_openrouter(prompt: str, system_prompt: str, max_tokens: int = 1500) -> str:
     """Call OpenRouter API."""
     from openai import AsyncOpenAI
     
@@ -39,15 +39,21 @@ async def _call_openrouter(prompt: str, system_prompt: str) -> str:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=1500,
+            max_tokens=max_tokens,
         )
-        return response.choices[0].message.content
+        choice = response.choices[0]
+        content = choice.message.content
+        if not content or not content.strip():
+            raise ValueError("OpenRouter returned an empty response (no exception raised)")
+        if getattr(choice, "finish_reason", None) == "length":
+            logger.warning(f"OpenRouter response was truncated at max_tokens={max_tokens}")
+        return content
     except Exception as e:
         logger.error(f"OpenRouter API error: {e}")
         raise
 
 
-async def _call_anthropic(prompt: str, system_prompt: str) -> str:
+async def _call_anthropic(prompt: str, system_prompt: str, max_tokens: int = 1500) -> str:
     """Call Anthropic Claude API."""
     import anthropic
 
@@ -56,17 +62,22 @@ async def _call_anthropic(prompt: str, system_prompt: str) -> str:
     try:
         response = await client.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=1500,
+            max_tokens=max_tokens,
             system=system_prompt,
             messages=[{"role": "user", "content": prompt}],
         )
-        return response.content[0].text
+        content = response.content[0].text if response.content else None
+        if not content or not content.strip():
+            raise ValueError("Anthropic returned an empty response (no exception raised)")
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            logger.warning(f"Anthropic response was truncated at max_tokens={max_tokens}")
+        return content
     except Exception as e:
         logger.error(f"Anthropic API error: {e}")
         raise
 
 
-async def _call_google(prompt: str, system_prompt: str) -> str:
+async def _call_google(prompt: str, system_prompt: str, max_tokens: int = 1500) -> str:
     """Call Google Gemini API."""
     import google.generativeai as genai
 
@@ -78,9 +89,17 @@ async def _call_google(prompt: str, system_prompt: str) -> str:
 
     try:
         response = await asyncio.to_thread(
-            model.generate_content, prompt
+            model.generate_content,
+            prompt,
+            generation_config=genai.types.GenerationConfig(max_output_tokens=max_tokens),
         )
-        return response.text
+        content = response.text
+        if not content or not content.strip():
+            raise ValueError("Google returned an empty response (no exception raised)")
+        candidates = getattr(response, "candidates", None)
+        if candidates and getattr(candidates[0], "finish_reason", None) == 2:  # 2 == MAX_TOKENS
+            logger.warning(f"Google response was truncated at max_output_tokens={max_tokens}")
+        return content
     except Exception as e:
         logger.error(f"Google API error: {e}")
         raise
@@ -111,27 +130,27 @@ async def _ensure_ollama_model(model_name: str, base_url: str = None):
     except Exception as e:
         logger.error(f"Failed to check or pull Ollama model {model_name}: {e}")
 
-async def _call_llm(prompt: str, system_prompt: str) -> str:
+async def _call_llm(prompt: str, system_prompt: str, max_tokens: int = 1500) -> str:
     """Route to the configured LLM provider, with fallback to others, and finally local Ollama."""
     
     # Try OpenRouter if configured
     if settings.openrouter_api_key:
         try:
-            return await _call_openrouter(prompt, system_prompt)
+            return await _call_openrouter(prompt, system_prompt, max_tokens=max_tokens)
         except Exception as e:
             logger.warning(f"OpenRouter failed: {e}. Trying next provider...")
 
     # Try Google if configured
     if settings.google_api_key:
         try:
-            return await _call_google(prompt, system_prompt)
+            return await _call_google(prompt, system_prompt, max_tokens=max_tokens)
         except Exception as e:
             logger.warning(f"Google API failed: {e}. Trying next provider...")
 
     # Try Anthropic if configured
     if settings.anthropic_api_key:
         try:
-            return await _call_anthropic(prompt, system_prompt)
+            return await _call_anthropic(prompt, system_prompt, max_tokens=max_tokens)
         except Exception as e:
             logger.warning(f"Anthropic API failed: {e}. Trying next provider...")
 
@@ -147,13 +166,17 @@ async def _call_llm(prompt: str, system_prompt: str) -> str:
     payload = {
         "model": model_name,
         "prompt": f"{system_prompt}\n\n{prompt}",
-        "stream": False
+        "stream": False,
+        "options": {"num_predict": max_tokens},
     }
     
     try:
         response = await asyncio.to_thread(requests.post, url, json=payload)
         response.raise_for_status()
-        return response.json()['response']
+        result = response.json().get('response')
+        if not result or not result.strip():
+            raise ValueError("Ollama returned an empty response")
+        return result
     except Exception as local_error:
         logger.error(f"Local LLM fallback failed: {local_error}")
         return f"System Failure: Both Cloud and Local APIs are down. Error: {local_error}"
@@ -274,16 +297,48 @@ FILE SUMMARIES:
 {summaries_text}
 
 INSTRUCTIONS:
-1. Write a 3-5 paragraph architecture overview in plain English
-2. Explain the overall structure and how the main components connect
-3. Highlight the entry points and what they do
-4. Mention the core modules and why they're central
-5. Note any concerning patterns (cycles, isolated files)
-6. Reference ONLY files and relationships that appear in the facts above
-7. Be technical but accessible Ã¢â‚¬â€ this is for a developer trying to understand the codebase
-8. Do NOT guess about functionality that isn't supported by the structural evidence"""
+1. Start with ONE short standalone sentence stating what this project is as a whole (e.g. "This is a full-stack tool that does X"), before any frontend/backend breakdown
+2. Then write a 3-5 paragraph architecture overview in plain English
+3. Explain the overall structure and how the main components connect
+4. Highlight the entry points and what they do
+5. Mention the core modules and why they're central
+6. Note any concerning patterns (cycles, isolated files)
+7. Reference ONLY files and relationships that appear in the facts above
+8. Be technical but accessible — this is for a developer trying to understand the codebase
+9. Do NOT guess about functionality that isn't supported by the structural evidence"""
 
     return prompt
+
+
+import re
+from dataclasses import dataclass, field
+
+
+@dataclass
+class ValidationResult:
+    """Result of grounding-checking an LLM-generated summary against known code facts."""
+    is_grounded: bool
+    checked_references: int
+    unverified_references: list[str] = field(default_factory=list)
+
+    def __bool__(self) -> bool:
+        return self.is_grounded
+
+    @property
+    def grounding_score(self) -> float:
+        """Fraction of checkable references that were actually verified. 1.0 if none to check."""
+        if self.checked_references == 0:
+            return 1.0
+        verified = self.checked_references - len(self.unverified_references)
+        return verified / self.checked_references
+
+
+# Tokens the model itself marked as an identifier/path by formatting: `like_this`
+_BACKTICK_REF_RE = re.compile(r"`([^`]+)`")
+# Bare call-style mentions: someFunction(
+_CALL_REF_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+# Tokens shaped like a repo-relative file path
+_PATH_REF_RE = re.compile(r"[\w./-]+\.(?:py|js|jsx|ts|tsx|json|yml|yaml|toml|sql)\b")
 
 
 def validate_summary(
@@ -291,15 +346,49 @@ def validate_summary(
     known_files: set[str],
     known_functions: set[str],
     known_classes: set[str],
-) -> bool:
+) -> ValidationResult:
     """
-    Lightweight validation: check that the summary doesn't reference
-    files or symbols that don't exist in the codebase.
-    Returns True if the summary is valid.
+    Check that identifiers/paths the LLM explicitly called out in a summary
+    actually exist in this codebase's structural facts.
+
+    This is deliberately precision-first, not full NER over the prose: only
+    tokens the model marked as identifiers/paths (backtick-quoted, call-style,
+    or path-shaped) are checked. Checking every capitalized word in free text
+    would misfire constantly ("the Router class", "the API layer") on ordinary
+    English, not hallucination. A flagged token is a strong hallucination
+    signal; an unflagged summary isn't proof every sentence is grounded, but
+    it catches the concrete, checkable claims — which is what actually matters
+    for "did the model invent a file/function/class that doesn't exist."
     """
-    # This is a basic check Ã¢â‚¬â€ could be enhanced with NER
-    # For now, just log warnings
-    return True
+    known_function_names = {f.rsplit(".", 1)[-1] for f in known_functions} | known_functions
+    known_class_names = {c.rsplit(".", 1)[-1] for c in known_classes} | known_classes
+    known_file_names = {f.rsplit("/", 1)[-1] for f in known_files} | known_files
+
+    candidates: set[str] = set()
+    candidates.update(_BACKTICK_REF_RE.findall(summary))
+    candidates.update(_CALL_REF_RE.findall(summary))
+    candidates.update(_PATH_REF_RE.findall(summary))
+
+    unverified = []
+    checked = 0
+    for raw in candidates:
+        token = raw.strip().rstrip("()").strip()
+        if len(token) < 3:
+            continue  # too short to be a meaningful check (avoids noise like "x", "i")
+        checked += 1
+        if (
+            token in known_file_names
+            or token in known_function_names
+            or token in known_class_names
+        ):
+            continue
+        unverified.append(token)
+
+    return ValidationResult(
+        is_grounded=len(unverified) == 0,
+        checked_references=checked,
+        unverified_references=sorted(unverified),
+    )
 
 
 async def generate_file_summary(
@@ -340,7 +429,7 @@ async def generate_file_summary(
 
     try:
         summary = await _call_llm(prompt, system_prompt)
-        return summary.strip()
+        return (summary or "").strip() or "Summary generation failed: LLM returned an empty response"
     except Exception as e:
         logger.error(f"Failed to generate summary for {file_path}: {e}")
         return f"Summary generation failed: {e}"
@@ -372,8 +461,8 @@ async def generate_architecture_narrative(
     )
 
     try:
-        narrative = await _call_llm(prompt, system_prompt)
-        return narrative.strip()
+        narrative = await _call_llm(prompt, system_prompt, max_tokens=3000)
+        return (narrative or "").strip() or "Architecture narrative generation failed: LLM returned an empty response"
     except Exception as e:
         logger.error(f"Failed to generate architecture narrative: {e}")
         return f"Architecture narrative generation failed: {e}"
@@ -398,6 +487,15 @@ async def generate_all_summaries(
     """
     roles = insights.get("roles", {})
     centrality = insights.get("centrality", {})
+
+    # Build the "known facts" sets once, up front — used to ground-check every
+    # summary against what actually exists in this repo (see validate_summary).
+    known_files: set[str] = set(graph.nodes())
+    known_functions: set[str] = set()
+    known_classes: set[str] = set()
+    for _, node_data in graph.nodes(data=True):
+        known_functions.update(node_data.get("functions", []))
+        known_classes.update(node_data.get("classes", []))
 
     # Sort files by importance (core modules and entry points first)
     role_priority = {"entry_point": 0, "core_module": 1, "utility": 2, "leaf": 3, "config": 4, "test": 5}
@@ -437,6 +535,15 @@ async def generate_all_summaries(
                 imports=node_data.get("imports", []),
                 graph=graph,
             )
+
+            validation = validate_summary(summary, known_files, known_functions, known_classes)
+            if not validation.is_grounded:
+                logger.warning(
+                    f"Summary for {node} references names not found in the codebase "
+                    f"(grounding score {validation.grounding_score:.2f}): "
+                    f"{validation.unverified_references}"
+                )
+
             file_summaries[node] = summary
             logger.info(f"Generated summary for {node}")
             
@@ -466,5 +573,13 @@ async def generate_all_summaries(
         insights=insights,
         file_summaries=file_summaries,
     )
+
+    narrative_validation = validate_summary(narrative, known_files, known_functions, known_classes)
+    if not narrative_validation.is_grounded:
+        logger.warning(
+            f"Architecture narrative references names not found in the codebase "
+            f"(grounding score {narrative_validation.grounding_score:.2f}): "
+            f"{narrative_validation.unverified_references}"
+        )
 
     return file_summaries, narrative

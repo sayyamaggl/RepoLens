@@ -1,5 +1,5 @@
 """
-ast_parser Ã¢â‚¬â€ Parse source files with tree-sitter to extract structural info.
+ast_parser — Parse source files with tree-sitter to extract structural info.
 
 Extracts functions, classes, imports, and exports from Python and JS/TS files.
 This feeds the dependency_graph and insight_engine modules.
@@ -12,6 +12,7 @@ from typing import Optional
 
 import tree_sitter_python as tspython
 import tree_sitter_javascript as tsjavascript
+import tree_sitter_typescript as tstypescript
 from tree_sitter import Language, Parser
 
 logger = logging.getLogger(__name__)
@@ -19,12 +20,17 @@ logger = logging.getLogger(__name__)
 # Initialize languages
 PY_LANGUAGE = Language(tspython.language(), "python")
 JS_LANGUAGE = Language(tsjavascript.language(), "javascript")
+TS_LANGUAGE = Language(tstypescript.language_typescript(), "typescript")
+TSX_LANGUAGE = Language(tstypescript.language_tsx(), "tsx")
 
-# Language name -> tree-sitter Language mapping
+# Language name -> tree-sitter Language mapping.
+# NOTE: "TypeScript" defaults to the plain .ts grammar here; parse_file()
+# switches to TSX_LANGUAGE for files ending in .tsx, since JSX syntax needs
+# the tsx grammar specifically (the plain ts grammar can't parse JSX).
 LANG_MAP = {
     "Python": PY_LANGUAGE,
     "JavaScript": JS_LANGUAGE,
-    "TypeScript": JS_LANGUAGE,  # JS grammar handles most TS
+    "TypeScript": TS_LANGUAGE,
 }
 
 
@@ -208,6 +214,10 @@ def parse_file(file_path: str, language: str) -> ParsedFile:
             parse_error=f"Unsupported language: {language}",
         )
 
+    # .tsx needs the dedicated tsx grammar (JSX syntax), not the plain ts one.
+    if language == "TypeScript" and file_path.endswith(".tsx"):
+        ts_language = TSX_LANGUAGE
+
     try:
         with open(file_path, "rb") as f:
             source_code = f.read()
@@ -233,7 +243,11 @@ def parse_file(file_path: str, language: str) -> ParsedFile:
     if language == "Python":
         parsed = _extract_python(tree.root_node, source_code)
     else:
+        # TS/TSX grammars are structural supersets of JS for the node types
+        # we extract (functions, classes, imports, exports), so the same
+        # walker works for JavaScript, TypeScript, and TSX.
         parsed = _extract_javascript(tree.root_node, source_code)
+        parsed.language = language
 
     parsed.path = file_path
     return parsed

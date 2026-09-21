@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, RefreshCw, Layout, GitCommit, FileText, AlertTriangle } from 'lucide-react';
+import { ArrowLeft, RefreshCw, Layout, GitCommit, Files, AlertTriangle } from 'lucide-react';
 import { api } from '../api/client';
 import { RepoInfo, OverviewResponse } from '../types';
 import AnalysisProgress from '../components/AnalysisProgress';
@@ -136,6 +136,14 @@ export default function RepoDetailPage() {
             }`}
           >
             <GitCommit className="w-4 h-4 mr-2" /> Dependency Graph
+          </button>
+          <button
+            onClick={() => setActiveTab('files')}
+            className={`flex items-center px-4 py-1.5 rounded-md text-sm font-medium transition-all ${
+              activeTab === 'files' ? 'bg-white/10 text-white shadow-sm' : 'text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            <Files className="w-4 h-4 mr-2" /> Files
           </button>
         </div>
 

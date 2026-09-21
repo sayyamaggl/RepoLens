@@ -199,14 +199,11 @@ export default function DependencyGraph({ repoId }: Props) {
     setSelectedNode(nodeId);
     setLoadingSummary(true);
     try {
-      // Find the file ID from graphData
-      // In a real app we'd need the numeric ID, so we might need to adjust the API or GraphNode to include the numeric ID.
-      // For now, let's fetch all files and find it, or assume the API can take the path.
-      // Assuming we have to fetch the files list to get the ID:
-      const filesResp = await api.getRepos(); // Actually need to get files for this repo
-      const filesRes = await fetch(`/api/repo/${repoId}/files`).then(r => r.json());
+      // GraphNode only exposes the file's path, not its numeric id, so we
+      // resolve it via the files list (already exposed through api.getRepoFiles).
+      const filesRes = await api.getRepoFiles(repoId);
       const file = filesRes.files.find((f: any) => f.path === nodeId);
-      
+
       if (file) {
         const summary = await api.getFileSummary(repoId, file.id);
         setFileSummary(summary);
